@@ -6,6 +6,7 @@ import datetime
 import copy
 import uuid
 import time
+import pprint
 
 class CollectorError(Exception):
     """if something goes wrong use this"""
@@ -24,7 +25,7 @@ class Resource(dict):
     """class for describing a JSON resource from the twitch API. It knows about all the metadata and can be used to e.g.
     retrieve the next set of items."""
 
-    def __init__(self, url, client_id = "twitchstats", *args, **kwargs):
+    def __init__(self, url, client_id = "twitchstats v2", *args, **kwargs):
         """initialize the resource.
 
         :param url: the URL this resource stands for
@@ -32,22 +33,31 @@ class Resource(dict):
         """
         super(Resource, self).__init__(*args, **kwargs)
         self.url = url
+        print url
         self.client_id = client_id
+
+        # fetch it
+        self()
+
+    def __call__(self):
+        """fetch the resource"""
 
         # lets retrieve the data for this resource
         headers = {'Client-ID': self.client_id, 
-                   'Accept' : 'application/vnd.twitchtv.v2+json'
+                   #'Accept' : 'application/vnd.twitchtv.v2+json'
         }
         attempts = 1
         while True:
-            response = requests.get(url, headers = headers)
+            self.response = response = requests.get(self.url, headers = headers)
+            print response.status_code
             if response.status_code == 200:
                 break
             attempts = attempts + 1
-            if attempts > 3:
+            if attempts > 5:
                 raise NetworkError("network error, code != 200", code = response.status_code, url = url)
             print "network error, trying again: ", response.text
-            time.sleep(2)
+            time.sleep(4)
+        self.clear()
         self.update(json.loads(response.text))
         self.links = self['_links']
         del self['_links']
@@ -57,7 +67,8 @@ class Resource(dict):
         """check if there is a next link available"""
         return "next" in self.links
 
-    def next(self):
+    @property
+    def next_batch(self):
         """retrieve the next batch"""
         url = self.links['next']
         return Resource(url, client_id = self.client_id)
@@ -91,6 +102,7 @@ class Collector(object):
     def __call__(self):
         """run all collectors"""
         self.collect_summary()
+        self.collect_games()
         self.collect_channels()
 
     def collect_summary(self):
@@ -99,34 +111,61 @@ class Collector(object):
         self.db.summary.insert(res)
 
     def collect_channels(self):
-        """retrieve the list of the top 50 streams and simply mark them as interesting streams to watch.
+        """retrieve the list of the top 99 streams and simply mark them as interesting streams to watch.
 
         What twitch returns is a list of streams associated with a channel. The difference is that a stream
         is one live session while the channel contains them. We will retrieve only channel information.
         
         """
-        res = self._get("/streams")
+        res = self._get("/streams?limit=99")
+        inserts = []
+        ok = True
+        if len(res['streams']) == 0:
+            print "** empty streams, something is broken"
+            ok = False
+        for stream in res['streams']:
+            channel = stream['channel']
+            d = dict(
+                _id = channel['_id'],
+                name = channel['name'],
+                display_name = channel['display_name'],
+                url = channel['url'],
+                logo = channel['logo'],
+                created_at = channel['created_at'],
+            )
+            stream['date'] = datetime.datetime.now()
+            stream['sid'] = stream['_id']
+            stream['_id'] = unicode(uuid.uuid4())
+            self.db.channels.save(d)            # this is the unique list of channels
+            del stream['channel']['_links']    # remove links to make data more compact
+            inserts.append(stream)
+        if ok:
+            print "saving all"
+            self.db.streams.insert(inserts)      # this is the snapshot of all streams every hour
+
+    def collect_games(self):
+        """get all games and their statistics
+        """
+        res = self._get("/games/top?limit=50")
         while True:
-            for stream in res['streams']:
-                channel = stream['channel']
+            for game in res['top']:
+                gameinfo = game['game']
                 d = dict(
-                    _id = channel['_id'],
-                    name = channel['name'],
-                    display_name = channel['display_name'],
-                    url = channel['url'],
-                    logo = channel['logo'],
-                    created_at = channel['created_at'],
+                    _id = gameinfo['_id'],
+                    giantbomb_id = gameinfo['giantbomb_id'],
+                    name = gameinfo['name'],
+                    viewers = game['viewers'],
+                    channels = game['channels'],
+                    date = datetime.datetime.now(),
                 )
-                stream['date'] = datetime.datetime.now()
-                stream['sid'] = stream['_id']
-                stream['_id'] = unicode(uuid.uuid4())
-                self.db.channels.save(d)            # this is the unique list of channels
-                del stream['channel']['_links']    # remove links to make data more compact
-                self.db.streams.insert(stream)      # this is the snapshot of all streams every hour
+                self.db.gamestats.save(d)           # game statistics over time
+                self.db.games.save(gameinfo)
+            if res['top'] == []:
+                break
             if not res.has_next:
                 break
             print "next batch"
-            res = res.next()
+            res = res.next_batch
 
     # collect channel delays?
     # collect broadcasting software
