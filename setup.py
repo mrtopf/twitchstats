@@ -19,10 +19,11 @@ setup(name='twitchstats',
       zip_safe=False,
       install_requires=[
         "requests",
+        "logbook",
         "pymongo",
       ],
       entry_points="""
       [console_scripts]
-      collect = twitchstats.scripts:collect
+      collect = twitchstats.collector:collect
       """,
       )

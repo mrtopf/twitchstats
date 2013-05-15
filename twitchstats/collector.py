@@ -7,6 +7,7 @@ import copy
 import uuid
 import time
 import pprint
+import logbook
 
 class CollectorError(Exception):
     """if something goes wrong use this"""
@@ -33,7 +34,6 @@ class Resource(dict):
         """
         super(Resource, self).__init__(*args, **kwargs)
         self.url = url
-        print url
         self.client_id = client_id
 
         # fetch it
@@ -44,18 +44,18 @@ class Resource(dict):
 
         # lets retrieve the data for this resource
         headers = {'Client-ID': self.client_id, 
-                   #'Accept' : 'application/vnd.twitchtv.v2+json'
+                   'Accept' : 'application/vnd.twitchtv.v2+json'
         }
         attempts = 1
         while True:
+            logbook.debug("fetching %s, attempt #%s" %(self.url, attempts))
             self.response = response = requests.get(self.url, headers = headers)
-            print response.status_code
             if response.status_code == 200:
                 break
             attempts = attempts + 1
             if attempts > 5:
-                raise NetworkError("network error, code != 200", code = response.status_code, url = url)
-            print "network error, trying again: ", response.text
+                logbook.error("network error, code: %s" %response.status_code)
+                raise NetworkError("network error, code != 200", code = response.status_code, url = self.url)
             time.sleep(4)
         self.clear()
         self.update(json.loads(response.text))
@@ -109,6 +109,7 @@ class Collector(object):
         res = self._get("/streams/summary")
         res['date'] = datetime.datetime.now()
         self.db.summary.insert(res)
+        logbook.debug("saving summary")
 
     def collect_channels(self):
         """retrieve the list of the top 99 streams and simply mark them as interesting streams to watch.
@@ -121,7 +122,7 @@ class Collector(object):
         inserts = []
         ok = True
         if len(res['streams']) == 0:
-            print "** empty streams, something is broken"
+            logbook.error("list of streams is empty, aborting")
             ok = False
         for stream in res['streams']:
             channel = stream['channel']
@@ -140,13 +141,15 @@ class Collector(object):
             del stream['channel']['_links']    # remove links to make data more compact
             inserts.append(stream)
         if ok:
-            print "saving all"
+            logbook.debug("saving %s streams" %len(inserts))
             self.db.streams.insert(inserts)      # this is the snapshot of all streams every hour
 
     def collect_games(self):
         """get all games and their statistics
         """
         res = self._get("/games/top?limit=50")
+        gameinfos = []
+        ok = True
         while True:
             for game in res['top']:
                 gameinfo = game['game']
@@ -158,22 +161,25 @@ class Collector(object):
                     channels = game['channels'],
                     date = datetime.datetime.now(),
                 )
-                self.db.gamestats.save(d)           # game statistics over time
-                self.db.games.save(gameinfo)
+                self.db.gamestats.insert(d)           # game statistics over time
+                self.db.games.save(gameinfo)        
+                gameinfos.append(gameinfo)
             if res['top'] == []:
                 break
             if not res.has_next:
                 break
-            print "next batch"
             res = res.next_batch
-
-    # collect channel delays?
-    # collect broadcasting software
-    # collect mature flag
-    # collect games streamed
+        logbook.debug("finished collecting games, got %s" %len(gameinfos))
 
 
+def collect():
+    """collect stats"""
 
+    error_handler = logbook.SyslogHandler('logbook example', level='ERROR', bubble=True)
+    with error_handler.applicationbound():
+        c = Collector("https://api.twitch.tv/kraken/")
+        c()
+    
 
 
         
